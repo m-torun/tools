@@ -1,0 +1,67 @@
+#!/usr/bin/env python3
+"""Copy a labelled sample to the clipboard in one specific flavor, so you can
+paste each into Apple Notes and see which one actually shows paragraph gaps.
+
+    fixpaste-test a    plain text, blank line between paragraphs
+    fixpaste-test b    rich text, spacing via paragraph margin (current fixpaste)
+    fixpaste-test c    rich text, zero margin + a real empty paragraph between
+    fixpaste-test d    rich text, margin AND empty paragraph
+
+Paste all four into one note, then say which ones have gaps.
+"""
+
+import importlib.machinery
+import importlib.util
+import os
+import pathlib
+import sys
+
+# fixpaste has no .py extension, so load it by path (following the symlink
+# this script may have been invoked through).
+_here = pathlib.Path(os.path.realpath(__file__)).parent / "fixpaste"
+_spec = importlib.util.spec_from_loader("fixpaste",
+                                        importlib.machinery.SourceFileLoader("fixpaste", str(_here)))
+fp = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(fp)
+
+PARAS = [
+    "First paragraph. It should be followed by a visible gap before the next one.",
+    "Second paragraph. If this is jammed right under the line above, this variant failed.",
+    "Third paragraph with *italic* and **bold** to check styling survives too.",
+]
+
+
+def sample(label):
+    return [f"VARIANT {label.upper()}"] + PARAS
+
+
+def main():
+    variant = (sys.argv[1] if len(sys.argv) > 1 else "").lower()
+    if variant not in "abcd" or not variant:
+        print(__doc__)
+        return 1
+
+    paras = [(p, fp.PROSE) for p in sample(variant)]
+    plain = "\n\n".join(p for p, _ in paras)
+
+    if variant == "a":
+        fp.write_clipboard(plain)
+        print(f"variant {variant}: plain text, blank lines -> clipboard")
+        return 0
+
+    body = "".join(f"<p>{fp.inline(p, True)}</p>" for p, _ in paras)
+    if variant in "cd":
+        # A real empty paragraph between each one, mirroring a blank line.
+        body = "<p><br></p>".join(f"<p>{fp.inline(p, True)}</p>" for p, _ in paras)
+    margin = "margin:0" if variant == "c" else "margin:0 0 16px 0"
+    style = f"body,p{{font-family:Helvetica;font-size:16px;{margin}}}"
+    doc = f'<html><head><meta charset="utf-8"><style>{style}</style></head><body>{body}</body></html>'
+
+    fp.write_clipboard(plain, fp.to_rtf(doc))
+    print(f"variant {variant}: rich text ({margin}"
+          f"{', empty paragraphs' if variant in 'cd' else ''}) -> clipboard")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

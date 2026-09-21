@@ -1,0 +1,367 @@
+#!/usr/bin/env python3
+"""Fix clipboard text so it pastes into Apple Notes the way you meant it.
+
+Two things go wrong when you copy prose out of a chat window, the web or
+a PDF and paste it into Notes:
+
+  Spacing. Notes adds no space of its own between paragraphs, so a break
+  only shows up if there is a real blank line. Source text arrives with a
+  single newline between paragraphs, or runs of 2+ blank lines, or hard
+  wrapped at ~72 columns. All three normalize to one blank line between
+  paragraphs.
+
+  Markdown. A plain-text paste cannot carry styling, so *Hamnet* lands as
+  literal asterisks. So the clipboard gets styled rich text (RTF) with the
+  emphasis applied, plus a marker-free plain-text copy for editors and
+  terminals that want plain text.
+
+Usage:
+    fixpaste             # rich text: markdown rendered, blank line between paragraphs
+    fixpaste -t          # plain text only, markdown markers stripped
+    fixpaste -s          # single newline between paragraphs instead of a blank line
+    fixpaste -p          # print what would be copied, change nothing
+    cat f.txt | fixpaste
+"""
+
+# Shortcuts and other launchers run this under /usr/bin/python3 (3.9),
+# so annotations must stay lazy -- 'bytes | None' would raise at import.
+from __future__ import annotations
+
+import argparse
+import html
+import os
+import re
+import stat
+import subprocess
+import sys
+import tempfile
+
+BULLET = re.compile(r"^[-*+•–—]\s+")
+NUMBER = re.compile(r"^(\d+)[.)]\s+")
+HEADING = re.compile(r"^(#{1,6})\s+")
+QUOTE = re.compile(r"^>\s?")
+FENCE = re.compile(r"^\s*```")
+
+# Invisible junk that survives copy/paste and shows up as a stray space.
+JUNK = dict.fromkeys(map(ord, "­​‌‍⁠﻿"))
+
+# Widest a line can be and still plausibly be machine hard-wrapped.
+MAX_WRAP_WIDTH = 120
+
+PROSE, STRUCT, CODE = "prose", "struct", "code"
+
+
+# --------------------------------------------------------------------------
+# clipboard
+
+
+def read_clipboard() -> str:
+    return subprocess.run(["pbpaste"], capture_output=True, text=True, check=True).stdout
+
+
+def write_clipboard(plain: str, rtf: bytes | None = None) -> None:
+    """Put text on the clipboard, optionally with a styled RTF flavor.
+
+    pbcopy can only carry one flavor, and an RTF-only clipboard pastes as
+    nothing in plain-text apps -- so when there is styling, hand both
+    flavors to AppleScript at once.
+    """
+    if rtf is None:
+        subprocess.run(["pbcopy"], input=plain, text=True, check=True)
+        return
+
+    with tempfile.TemporaryDirectory() as tmp:
+        rtf_path, txt_path = os.path.join(tmp, "s.rtf"), os.path.join(tmp, "s.txt")
+        with open(rtf_path, "wb") as f:
+            f.write(rtf)
+        with open(txt_path, "w", encoding="utf-8") as f:
+            f.write(plain)
+        script = f'''
+            set the clipboard to {{«class RTF »:(read POSIX file "{rtf_path}" as «class RTF »), ¬
+                                   string:(read POSIX file "{txt_path}" as «class utf8»)}}
+        '''
+        subprocess.run(["osascript", "-e", script], check=True, capture_output=True)
+
+
+def to_rtf(html_doc: str) -> bytes:
+    # textutil's -font/-fontsize are ignored for HTML input; the font comes
+    # from the document's own CSS instead (see render_html).
+    done = subprocess.run(
+        ["textutil", "-stdin", "-format", "html", "-convert", "rtf", "-stdout"],
+        input=html_doc.encode("utf-8"), capture_output=True, check=True,
+    )
+    return done.stdout
+
+
+# --------------------------------------------------------------------------
+# structure
+
+
+def split_blocks(text: str) -> list[tuple[list[str], str]]:
+    """Group lines into blocks on blank lines, tagged prose/struct/code."""
+    blocks: list[tuple[list[str], str]] = []
+    current: list[str] = []
+    kind = PROSE
+    fenced: list[str] | None = None
+
+    def flush():
+        nonlocal current, kind
+        if current:
+            blocks.append((current, kind))
+        current, kind = [], PROSE
+
+    for raw in text.split("\n"):
+        if FENCE.match(raw):
+            if fenced is None:
+                flush()
+                fenced = []
+            else:
+                blocks.append((fenced, CODE))
+                fenced = None
+            continue
+        if fenced is not None:
+            fenced.append(raw.rstrip())  # indentation is meaningful here
+            continue
+
+        line = raw.strip()
+        structural = bool(BULLET.match(line) or NUMBER.match(line)
+                          or HEADING.match(line) or QUOTE.match(line)
+                          or line.startswith("|"))
+        if not line:
+            flush()
+        elif structural:
+            flush()
+            current, kind = [line], STRUCT
+        elif kind == STRUCT:
+            flush()          # prose after a bullet belongs to itself
+            current = [line]
+        else:
+            current.append(line)
+
+    if fenced:
+        blocks.append((fenced, CODE))
+    flush()
+    return blocks
+
+
+def looks_hard_wrapped(blocks: list[tuple[list[str], str]]) -> bool:
+    """True only for text a machine wrapped at a fixed column.
+
+    The tell is that continuation lines -- lines with another line under
+    them -- nearly all run to about the same width. Prose whose paragraphs
+    merely sit on their own lines has wildly uneven lengths and must NOT be
+    unwrapped: doing so welds the whole document into one paragraph.
+    """
+    prose = [lines for lines, kind in blocks if kind != CODE]
+    cont = [len(line) for lines in prose for line in lines[:-1]]
+    if len(cont) < 2:
+        return False
+    width = max(len(line) for lines in prose for line in lines)
+    if width > MAX_WRAP_WIDTH:
+        return False
+    return sum(1 for n in cont if n >= 0.75 * width) / len(cont) >= 0.7
+
+
+def join_wrapped(lines: list[str]) -> str:
+    """Rejoin hard-wrapped lines. A trailing hyphen is kept but not padded,
+    so "hard-" + "wrapped" becomes "hard-wrapped"."""
+    out = lines[0]
+    for line in lines[1:]:
+        out += line if out.endswith("-") else " " + line
+    return out
+
+
+def paragraphs(text: str) -> list[tuple[str, str]]:
+    """Normalize to a flat list of (text, kind) paragraphs."""
+    text = text.translate(JUNK).replace("\r\n", "\n").replace("\r", "\n")
+    text = text.replace(" ", " ")  # non-breaking space
+
+    blocks = split_blocks(text)
+    blocks = [([re.sub(r"[ \t]+", " ", l) for l in lines] if kind != CODE else lines, kind)
+              for lines, kind in blocks]
+    if not blocks:
+        return []
+
+    out: list[tuple[str, str]] = []
+    unwrap = looks_hard_wrapped(blocks)
+    for lines, kind in blocks:
+        if kind == CODE:
+            out.append(("\n".join(lines), CODE))
+        elif unwrap:
+            out.append((join_wrapped(lines), kind))
+        else:
+            out.extend((line, kind) for line in lines)
+    return out
+
+
+# --------------------------------------------------------------------------
+# inline markdown
+
+
+CODE_SPAN = re.compile(r"`([^`]+)`")
+LINK = re.compile(r"\[([^\]]+)\]\(([^)\s]+)[^)]*\)")
+BOLD = re.compile(r"(?<!\w)(\*\*|__)(?=\S)(.+?)(?<=\S)\1(?!\w)")
+ITALIC = re.compile(r"(?<![\w*])\*(?=\S)([^*\n]+?)(?<=\S)\*(?!\w)"
+                    r"|(?<![\w_])_(?=\S)([^_\n]+?)(?<=\S)_(?!\w)")
+STRIKE = re.compile(r"~~(?=\S)(.+?)(?<=\S)~~")
+
+
+def inline(text: str, styled: bool) -> str:
+    """Render inline markdown to HTML, or strip the markers for plain text."""
+    spans: list[str] = []
+
+    def stash(m):
+        spans.append(m.group(1))
+        return f"\x00{len(spans) - 1}\x00"
+
+    text = CODE_SPAN.sub(stash, text)
+    if styled:
+        text = html.escape(text)
+
+    text = LINK.sub(
+        (lambda m: f'<a href="{html.escape(m.group(2), quote=True)}">{m.group(1)}</a>')
+        if styled else r"\1",
+        text,
+    )
+    text = BOLD.sub((lambda m: f"<b>{m.group(2)}</b>") if styled else r"\2", text)
+    text = ITALIC.sub(
+        (lambda m: f"<i>{m.group(1) or m.group(2)}</i>")
+        if styled else (lambda m: m.group(1) or m.group(2)),
+        text,
+    )
+    text = STRIKE.sub((lambda m: f"<s>{m.group(1)}</s>") if styled else r"\1", text)
+
+    for i, span in enumerate(spans):
+        replacement = f"<code>{html.escape(span)}</code>" if styled else span
+        text = text.replace(f"\x00{i}\x00", replacement)
+    return text.replace("\\*", "*").replace("\\_", "_")
+
+
+# --------------------------------------------------------------------------
+# rendering
+
+
+def is_list_item(para: str) -> bool:
+    return bool(BULLET.match(para) or NUMBER.match(para) or para.startswith("|"))
+
+
+def render_plain(paras: list[tuple[str, str]], single: bool) -> str:
+    out = []
+    for i, (para, kind) in enumerate(paras):
+        body = para if kind == CODE else inline(HEADING.sub("", para), styled=False)
+        if i:
+            # Consecutive items of one list stay tight; a quote or heading
+            # following a list still gets its own blank line.
+            same_list = is_list_item(paras[i - 1][0]) and is_list_item(para)
+            out.append("\n" if single or same_list else "\n\n")
+        out.append(body)
+    return "".join(out)
+
+
+def render_html(paras: list[tuple[str, str]], font: str = "Helvetica", size: int = 16) -> str:
+    out: list[str] = []
+    list_tag: str | None = None
+
+    def close_list():
+        nonlocal list_tag
+        if list_tag:
+            out.append(f"</{list_tag}>")
+            list_tag = None
+
+    def open_list(tag):
+        nonlocal list_tag
+        if list_tag != tag:
+            close_list()
+            out.append(f"<{tag}>")
+            list_tag = tag
+
+    for i, (para, kind) in enumerate(paras):
+        # Separate blocks with a real empty paragraph rather than relying on
+        # margins: Notes honours an empty paragraph the same way it honours a
+        # blank line in plain text, which is the spacing that actually works.
+        if i and not (is_list_item(paras[i - 1][0]) and is_list_item(para)):
+            close_list()
+            out.append("<p><br></p>")
+        if kind == CODE:
+            close_list()
+            out.append(f"<pre>{html.escape(para)}</pre>")
+            continue
+        if heading := HEADING.match(para):
+            close_list()
+            level = len(heading.group(1))
+            out.append(f"<h{level}>{inline(para[heading.end():], True)}</h{level}>")
+        elif BULLET.match(para):
+            open_list("ul")
+            out.append(f"<li>{inline(BULLET.sub('', para), True)}</li>")
+        elif NUMBER.match(para):
+            open_list("ol")
+            out.append(f"<li>{inline(NUMBER.sub('', para), True)}</li>")
+        elif QUOTE.match(para):
+            close_list()
+            out.append(f"<blockquote><p>{inline(QUOTE.sub('', para), True)}</p></blockquote>")
+        else:
+            close_list()
+            out.append(f"<p>{inline(para, True)}</p>")
+    close_list()
+    # textutil gives <p> a 1em space-after of its own, which is exactly the
+    # paragraph gap Notes needs -- no blank-line padding required here.
+    # margin:0 everywhere -- the empty paragraphs above provide the gaps, so
+    # margins on top of them would double the spacing.
+    style = (f"body,p,li,h1,h2,h3,h4,h5,h6,blockquote{{font-family:{font};"
+             f"font-size:{size}px;margin:0;padding:0}}"
+             f"code,pre{{font-family:Menlo,monospace}}")
+    return ('<html><head><meta charset="utf-8">'
+            f"<style>{style}</style></head><body>"
+            + "".join(out) + "</body></html>")
+
+
+def has_styling(paras: list[tuple[str, str]]) -> bool:
+    return any(kind != PROSE or inline(para, styled=False) != para
+               for para, kind in paras)
+
+
+# --------------------------------------------------------------------------
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("-t", "--text", action="store_true",
+                    help="plain text only; strip markdown markers instead of rendering them")
+    ap.add_argument("-s", "--single", action="store_true",
+                    help="single newline between paragraphs instead of a blank line")
+    ap.add_argument("-c", "--clipboard", action="store_true",
+                    help="always read the clipboard, ignoring stdin (for hotkeys and launchers)")
+    ap.add_argument("-p", "--print", dest="show", action="store_true",
+                    help="print what would be copied, and leave the clipboard alone")
+    ap.add_argument("--font", default="Helvetica", help="font for rich text (default: Helvetica; try '-apple-system' for Helvetica Neue)")
+    ap.add_argument("--size", type=int, default=16, help="point size for rich text (default: 16)")
+    args = ap.parse_args()
+
+    # Use stdin only when something is actually piped or redirected in; a
+    # tty, /dev/null or an idle pipe means "read the clipboard" rather than
+    # block forever waiting for input that will never arrive.
+    mode = os.fstat(sys.stdin.fileno()).st_mode
+    piped = not args.clipboard and (stat.S_ISFIFO(mode) or stat.S_ISREG(mode))
+    text = (sys.stdin.read() if piped else "") or read_clipboard()
+    if not text.strip():
+        print("fixpaste: nothing to fix", file=sys.stderr)
+        return 1
+
+    paras = paragraphs(text)
+    plain = render_plain(paras, single=args.single)
+    styled = not args.text and has_styling(paras)
+
+    if args.show:
+        print(render_html(paras, args.font, args.size) if styled else plain)
+        return 0
+
+    rtf = to_rtf(render_html(paras, args.font, args.size)) if styled else None
+    write_clipboard(plain, rtf)
+    n = len(paras)
+    kind = "styled" if styled else "plain"
+    print(f"fixpaste: {n} paragraph{'s' if n != 1 else ''} ready to paste ({kind})")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
