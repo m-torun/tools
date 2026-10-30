@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.claude-rc</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/mustafa/code/tools/claude-rc/claude-rc</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/opt/homebrew/sbin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>LANG</key>
+		<string>en_US.UTF-8</string>
+	</dict>
+	<key>RunAtLoad</key>
+	<true/>
+	<!-- Started again if it exits; ThrottleInterval keeps a failing start from looping fast. -->
+	<key>KeepAlive</key>
+	<true/>
+	<key>ThrottleInterval</key>
+	<integer>30</integer>
+	<key>StandardOutPath</key>
+	<string>/Users/mustafa/Library/Logs/claude-rc.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/mustafa/Library/Logs/claude-rc.log</string>
+</dict>
+</plist>

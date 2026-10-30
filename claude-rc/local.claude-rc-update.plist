@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>local.claude-rc-update</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/Users/mustafa/code/tools/claude-rc/claude-rc</string>
+		<string>restart-if-new</string>
+	</array>
+	<key>EnvironmentVariables</key>
+	<dict>
+		<key>PATH</key>
+		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+	</dict>
+	<!-- Daily at 04:00, when no session should be in use; the restart ends open sessions. -->
+	<key>StartCalendarInterval</key>
+	<dict>
+		<key>Hour</key>
+		<integer>4</integer>
+		<key>Minute</key>
+		<integer>0</integer>
+	</dict>
+	<key>StandardOutPath</key>
+	<string>/Users/mustafa/Library/Logs/claude-rc.log</string>
+	<key>StandardErrorPath</key>
+	<string>/Users/mustafa/Library/Logs/claude-rc.log</string>
+</dict>
+</plist>
