@@ -7,14 +7,17 @@
 	<key>ProgramArguments</key>
 	<array>
 		<string>/Users/mustafa/code/tools/claude-rc/claude-rc</string>
-		<string>restart-if-new</string>
+		<string>update</string>
 	</array>
 	<key>EnvironmentVariables</key>
 	<dict>
 		<key>PATH</key>
 		<string>/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+		<key>HOMEBREW_NO_ENV_HINTS</key>
+		<string>1</string>
 	</dict>
-	<!-- Daily at 04:00, when no session should be in use; the restart ends open sessions. -->
+	<!-- Daily at 04:00, when no session should be in use: a restart ends open sessions.
+	     If the Mac is asleep then, launchd runs it on wake. -->
 	<key>StartCalendarInterval</key>
 	<dict>
 		<key>Hour</key>

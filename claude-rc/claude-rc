@@ -1,59 +1,57 @@
 #!/bin/bash
-# Runs Claude Code's Remote Control host from a private copy of the binary.
+# Runs Claude Code's Remote Control host, and updates Claude Code at night.
 #
-#   claude-rc                  start the host (launchd runs this)
-#   claude-rc restart-if-new   restart the host if Homebrew has a newer version
+#   claude-rc          start the host (launchd runs this)
+#   claude-rc update   upgrade Claude Code with Homebrew and restart the host on it
 #
-# Remote Control starts every new session from its own binary's path. Homebrew
-# deletes the old version's folder when it upgrades Claude Code, after which a
-# host started from Homebrew can no longer start sessions. A copy here is ours,
-# so the host keeps working until the nightly restart moves it to the new one.
+# Remote Control starts every new session from its own binary's path, and
+# Homebrew deletes the old version's folder when it upgrades Claude Code. A host
+# that outlives an upgrade can no longer start sessions. So upgrades happen only
+# here, followed at once by a restart; Claude Code's own background upgrade is
+# off (CLAUDE_CODE_PACKAGE_MANAGER_AUTO_UPDATE in ~/.claude/settings.json).
+#
+# A copy of the binary outside Homebrew would avoid the restart, but a copy
+# cannot read Claude Code's login from the keychain: it hangs at startup.
 set -euo pipefail
 
 BREW_CLAUDE=/opt/homebrew/bin/claude
-COPIES="$HOME/Library/Application Support/claude-rc"
+CASK=claude-code@latest
 LABEL=local.claude-rc
 WORKDIR="$HOME/code"
 
+stamp() { date '+%F %T'; }
 version_of() { "$1" --version 2>/dev/null | awk '{print $1}'; }
 
-# The version the running host was started from, or nothing.
-running_version() {
+start() {
+    local binary
+    binary=$(realpath "$BREW_CLAUDE")
+    echo "$(stamp) starting Remote Control with Claude Code $(version_of "$binary")"
+    cd "$WORKDIR"
+    exec "$binary" remote-control
+}
+
+# The binary the running host was started from, or nothing.
+running_binary() {
     local pid
     pid=$(launchctl print "gui/$(id -u)/$LABEL" 2>/dev/null | awk '$1 == "pid" {print $3}')
     [ -n "$pid" ] || return 0
-    ps -o command= -p "$pid" | sed -n "s|^$COPIES/\([^/]*\)/claude .*|\1|p"
+    ps -o command= -p "$pid" | sed -n 's| remote-control$||p'
 }
 
-start() {
-    local version copy
-    version=$(version_of "$BREW_CLAUDE")
-    [ -n "$version" ] || { echo "cannot read the version of $BREW_CLAUDE" >&2; exit 1; }
-    copy="$COPIES/$version/claude"
-    if [ ! -x "$copy" ]; then
-        mkdir -p "$COPIES/$version"
-        cp "$(realpath "$BREW_CLAUDE")" "$copy.tmp"
-        mv "$copy.tmp" "$copy"
-    fi
-    # Older copies are no longer needed: this start replaces the host that used them.
-    find "$COPIES" -mindepth 1 -maxdepth 1 -type d ! -name "$version" -exec rm -rf {} +
-    echo "$(date '+%F %T') starting Remote Control with Claude Code $version"
-    cd "$WORKDIR"
-    exec "$copy" remote-control
-}
-
-restart_if_new() {
-    local new running
-    new=$(version_of "$BREW_CLAUDE")
-    running=$(running_version)
-    if [ -n "$new" ] && [ "$new" != "$running" ]; then
-        echo "$(date '+%F %T') restarting Remote Control: ${running:-not running} -> $new"
+update() {
+    echo "$(stamp) brew upgrade --cask $CASK"
+    brew upgrade --cask "$CASK" || echo "$(stamp) brew upgrade failed; checking the host anyway"
+    local current running
+    current=$(realpath "$BREW_CLAUDE")
+    running=$(running_binary)
+    if [ "$current" != "$running" ]; then
+        echo "$(stamp) restarting Remote Control: ${running:-not running} -> $current"
         launchctl kickstart -k "gui/$(id -u)/$LABEL"
     fi
 }
 
 case "${1:-}" in
     "") start ;;
-    restart-if-new) restart_if_new ;;
-    *) echo "usage: claude-rc [restart-if-new]" >&2; exit 2 ;;
+    update) update ;;
+    *) echo "usage: claude-rc [update]" >&2; exit 2 ;;
 esac
