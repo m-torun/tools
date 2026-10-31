@@ -6,7 +6,7 @@ import IOKit
 let vendorID = 0x0424   // Microchip/SMSC
 let productID = 0x7206  // USB7206 Smart Hub, inside the Dell U3225QE
 let takeURL = "magicswitch://switch?direction=take"
-let settleSeconds = 2.0    // let the Mac finish enumerating the hub
+let settleSeconds = 0.25   // only coalesces the hub's USB devices; a longer wait just delays the keyboard
 let debounceSeconds = 15.0 // the hub shows up as several USB devices per switch
 let dryRun = CommandLine.arguments.contains("--dry-run")
 
