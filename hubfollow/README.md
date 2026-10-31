@@ -20,4 +20,4 @@ For a different hub, change `vendorID` and `productID` in `hubfollow.swift`.
 
 ## other-mac/
 
-While this is being set up, the assistants on the two Macs talk through this branch: [other-mac/INSTRUCTIONS.md](other-mac/INSTRUCTIONS.md) holds the current task for the second Mac, and [other-mac/REPORT.md](other-mac/REPORT.md) holds its answer.
+[other-mac/INSTRUCTIONS.md](other-mac/INSTRUCTIONS.md) is the setup for the second Mac, written for an assistant running there.
