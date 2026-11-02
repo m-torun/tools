@@ -22,7 +22,7 @@ Do not commit or push anything to this repository. It is public. Tell the owner 
    open -a "Magic Switch"
    ```
 
-3. Read `hubfollow/hubfollow.swift` and `hubfollow/install.sh`. If they do anything other than watch for a USB hub and open a `magicswitch://` URL, stop and tell the owner. Otherwise run:
+3. Read `hubfollow/hubfollow.swift` and `hubfollow/install.sh`. If they do anything other than watch for a USB hub and a Bluetooth keyboard connecting, and open `magicswitch://` URLs, stop and tell the owner. Otherwise run:
 
    ```sh
    hubfollow/install.sh
