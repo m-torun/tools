@@ -5,7 +5,15 @@ import IOKit
 
 let vendorID = 0x0424   // Microchip/SMSC
 let productID = 0x7206  // USB7206 Smart Hub, inside the Dell U3225QE
-let takeURL = "magicswitch://switch?direction=take"
+// One device at a time. When two pairings overlap, macOS loses track of the app that asked
+// for the second one and shows a "Connection Request" popup for it. The mouse goes first
+// because macOS will not auto-accept a mouse, so a mistimed mouse could need a real click,
+// while a mistimed keyboard only gets a popup that does nothing.
+let takeURLs = [
+    "magicswitch://switch?peripheral=mouse&direction=take",
+    "magicswitch://switch?peripheral=keyboard&direction=take",
+]
+let gapSeconds = 4.0       // long enough for the mouse to finish pairing
 let settleSeconds = 0.25   // only coalesces the hub's USB devices; a longer wait just delays the keyboard
 let debounceSeconds = 15.0 // the hub shows up as several USB devices per switch
 let dryRun = CommandLine.arguments.contains("--dry-run")
@@ -32,20 +40,26 @@ func take() {
     guard Date().timeIntervalSince(lastTake) > debounceSeconds else { return }
     lastTake = Date()
     log("hub arrived, taking peripherals in \(settleSeconds)s")
-    DispatchQueue.main.asyncAfter(deadline: .now() + settleSeconds) {
-        if dryRun {
-            log("dry run: would open \(takeURL)")
-            return
+    for (index, url) in takeURLs.enumerated() {
+        DispatchQueue.main.asyncAfter(deadline: .now() + settleSeconds + Double(index) * gapSeconds) {
+            openURL(url)
         }
-        let open = Process()
-        open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        open.arguments = ["-g", takeURL]
-        do {
-            try open.run()
-            log("opened \(takeURL)")
-        } catch {
-            log("could not run open: \(error)")
-        }
+    }
+}
+
+func openURL(_ url: String) {
+    if dryRun {
+        log("dry run: would open \(url)")
+        return
+    }
+    let open = Process()
+    open.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+    open.arguments = ["-g", url]
+    do {
+        try open.run()
+        log("opened \(url)")
+    } catch {
+        log("could not run open: \(error)")
     }
 }
 
