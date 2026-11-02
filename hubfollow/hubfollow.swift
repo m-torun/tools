@@ -1,24 +1,26 @@
-// hubfollow: when the Dell's USB hub arrives on this Mac, take the keyboard and mouse.
+// hubfollow: when the Dell's USB hub arrives on this Mac, take the keyboard, then the mouse.
 // The hub moves with the monitor's input, so the monitor's own button drives the handoff.
 import Foundation
 import IOKit
 
 let vendorID = 0x0424   // Microchip/SMSC
 let productID = 0x7206  // USB7206 Smart Hub, inside the Dell U3225QE
-// One device at a time. When two pairings overlap, macOS loses track of the app that asked
-// for the second one and shows a "Connection Request" popup for it. The mouse goes first
-// because macOS will not auto-accept a mouse, so a mistimed mouse could need a real click,
-// while a mistimed keyboard only gets a popup that does nothing.
-let takeURLs = [
-    "magicswitch://switch?peripheral=mouse&direction=take",
-    "magicswitch://switch?peripheral=keyboard&direction=take",
-]
-let gapSeconds = 4.0       // long enough for the mouse to finish pairing
+
+// One device at a time. macOS remembers that an app asked to pair as one flag per app, and
+// clears it after each pairing, so when two pairings overlap it shows a "Connection Request"
+// popup for the second. The keyboard goes first so this Mac can be woken and unlocked.
+let keyboardURL = "magicswitch://switch?peripheral=keyboard&direction=take"
+let mouseURL = "magicswitch://switch?peripheral=mouse&direction=take"
+let keyboardName = "Magic Keyboard" // its Bluetooth name, which tells us when it has connected
+let keyboardWaitSeconds = 20.0      // take the mouse anyway if the keyboard never shows up
+
 let settleSeconds = 0.25   // only coalesces the hub's USB devices; a longer wait just delays the keyboard
 let debounceSeconds = 15.0 // the hub shows up as several USB devices per switch
 let dryRun = CommandLine.arguments.contains("--dry-run")
 
 var lastTake = Date.distantPast
+var waitingForKeyboard = false
+var handoff = 0 // tells a timeout which handoff it belongs to
 
 func log(_ message: String) {
     let stamp = ISO8601DateFormatter().string(from: Date())
@@ -26,7 +28,7 @@ func log(_ message: String) {
     fflush(stdout)
 }
 
-// Empties the iterator, which also re-arms the notification. Returns how many hubs it held.
+// Empties the iterator, which also re-arms the notification. Returns how many devices it held.
 func drain(_ iterator: io_iterator_t) -> Int {
     var count = 0
     while case let device = IOIteratorNext(iterator), device != 0 {
@@ -36,15 +38,48 @@ func drain(_ iterator: io_iterator_t) -> Int {
     return count
 }
 
-func take() {
+func keyboardMatching() -> CFDictionary {
+    let matching = IOServiceMatching("IOHIDInterface") as NSMutableDictionary
+    matching["IOPropertyMatch"] = ["Product": keyboardName, "Transport": "Bluetooth"]
+    return matching as CFDictionary
+}
+
+func keyboardIsHere() -> Bool {
+    var found: io_iterator_t = 0
+    guard IOServiceGetMatchingServices(kIOMainPortDefault, keyboardMatching(), &found) == KERN_SUCCESS else {
+        return false
+    }
+    defer { IOObjectRelease(found) }
+    return drain(found) > 0
+}
+
+func hubArrived() {
     guard Date().timeIntervalSince(lastTake) > debounceSeconds else { return }
     lastTake = Date()
-    log("hub arrived, taking peripherals in \(settleSeconds)s")
-    for (index, url) in takeURLs.enumerated() {
-        DispatchQueue.main.asyncAfter(deadline: .now() + settleSeconds + Double(index) * gapSeconds) {
-            openURL(url)
-        }
+    log("hub arrived")
+    DispatchQueue.main.asyncAfter(deadline: .now() + settleSeconds, execute: takeKeyboard)
+}
+
+func takeKeyboard() {
+    handoff += 1
+    if keyboardIsHere() {
+        log("keyboard already here")
+        openURL(mouseURL)
+        return
     }
+    waitingForKeyboard = true
+    openURL(keyboardURL)
+    let thisHandoff = handoff
+    DispatchQueue.main.asyncAfter(deadline: .now() + keyboardWaitSeconds) {
+        guard waitingForKeyboard, thisHandoff == handoff else { return }
+        log("keyboard did not connect in \(keyboardWaitSeconds)s")
+        takeMouse()
+    }
+}
+
+func takeMouse() {
+    waitingForKeyboard = false
+    openURL(mouseURL)
 }
 
 func openURL(_ url: String) {
@@ -69,22 +104,38 @@ guard let port = IONotificationPortCreate(kIOMainPortDefault) else {
 }
 CFRunLoopAddSource(CFRunLoopGetMain(), IONotificationPortGetRunLoopSource(port).takeUnretainedValue(), .defaultMode)
 
-let matching = IOServiceMatching("IOUSBHostDevice") as NSMutableDictionary
-matching["idVendor"] = vendorID
-matching["idProduct"] = productID
+let hubMatching = IOServiceMatching("IOUSBHostDevice") as NSMutableDictionary
+hubMatching["idVendor"] = vendorID
+hubMatching["idProduct"] = productID
 
-var iterator: io_iterator_t = 0
-let status = IOServiceAddMatchingNotification(
-    port, kIOFirstMatchNotification, matching as CFDictionary,
+var hubIterator: io_iterator_t = 0
+var status = IOServiceAddMatchingNotification(
+    port, kIOFirstMatchNotification, hubMatching as CFDictionary,
     { _, iterator in
-        if drain(iterator) > 0 { take() }
+        if drain(iterator) > 0 { hubArrived() }
     },
-    nil, &iterator)
+    nil, &hubIterator)
 guard status == KERN_SUCCESS else {
     log("could not watch for the hub: \(status)")
     exit(1)
 }
 
+var keyboardIterator: io_iterator_t = 0
+status = IOServiceAddMatchingNotification(
+    port, kIOFirstMatchNotification, keyboardMatching(),
+    { _, iterator in
+        if drain(iterator) > 0, waitingForKeyboard {
+            log("keyboard connected")
+            takeMouse()
+        }
+    },
+    nil, &keyboardIterator)
+guard status == KERN_SUCCESS else {
+    log("could not watch for the keyboard: \(status)")
+    exit(1)
+}
+_ = drain(keyboardIterator)
+
 // A hub already here at launch is not an arrival: don't pull devices off the other Mac on login.
-log("watching for \(String(format: "%04x:%04x", vendorID, productID)); present now: \(drain(iterator))\(dryRun ? " (dry run)" : "")")
+log("watching for \(String(format: "%04x:%04x", vendorID, productID)); present now: \(drain(hubIterator))\(dryRun ? " (dry run)" : "")")
 CFRunLoopRun()
